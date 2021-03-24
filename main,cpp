@@ -1,0 +1,319 @@
+#include <iostream>
+#include <unistd.h>
+#include <pthread.h>
+#include <semaphore.h>
+#include <iomanip>
+#include <fstream>
+#include "generator.cpp"
+using namespace std;
+
+//Made by Kush Banbah
+//Compile statement: g++ main.cpp -lpthread -o {executablefilename}
+//To run program: ./{executablefilename} {crawler_interval} {classifer_interval} {strategy_interval} {M articles}
+
+
+
+//Arguements
+long int  crawler_time;
+long int  classify_time;
+long int strat_time;
+long int m;
+
+char* buffer[12]; //Buffer of the 12 articles stored as char pointers
+bool done = false; //Turns true when enough articles of each label have been found
+int buffer_index = 0;
+
+sem_t bufferfree; //Semaphore for buffer
+sem_t update[3]; //Semaphore for when crawlers are updating
+
+ofstream myfile; 
+pthread_mutex_t mutex = PTHREAD_MUTEX_INITIALIZER; //mutex for accessing buffer queue
+pthread_mutex_t mutex_io = PTHREAD_MUTEX_INITIALIZER; //mutex for printing to terminal, so outputs of each thread don't overwrite
+
+
+bool start_wait[3];  //boolean for starting crawler wait
+bool finished=false; //when all the crawlers have exited
+bool done_wait[3]; //boolean for when crawler wait time is over
+
+char* str_generator(void); //prototype for generator
+
+void addtobuffer(char* s) //adding to buffer
+{
+    buffer[buffer_index] = s;
+    buffer_index++;
+}
+
+
+char* pop() { //removing an item from the buffer, i.e popping it, moving everything in the buffer down by 1 index and making space
+    char* tmp = buffer[0];
+
+    for (int c = 0; c < 11; c++)
+    {
+        buffer[c] = buffer[c + 1];
+    }
+    buffer_index--;
+    buffer[buffer_index]=NULL;
+    return tmp;
+}
+//function to print everything neatly in a table, uses mutex to ensure only one thread can print at one time
+void printweb(string s, int id)
+{ 
+   pthread_mutex_lock(&mutex_io);
+    switch (id)
+    {
+    case 1: {
+        cout << left << s << endl;
+        break;
+
+    }
+    case 2: {
+        cout << left << setfill(' ') << setw(30) << ' ' << s << endl;
+        break;
+
+    }
+    case 3: {
+        cout << left << setfill(' ') << setw(60) << ' ' << s << endl;
+        break;
+
+    }
+    case 4:
+    {
+         cout << left << setfill(' ') << setw(90) << ' ' << s << endl;
+         break;
+    }
+    case 5:
+    {
+          cout << left << setfill(' ') << setw(120) << ' ' << s << endl;
+          break;
+    }
+    default:
+        break;
+    }
+    pthread_mutex_unlock(&mutex_io);
+}
+
+
+
+
+//web crawler thread
+//All the intial values are set to 0 and a sem try wait is done to see if the buffer is full or not
+//if not, then there is space in the buffer so the crawler grabs it, sleeps for interval, adds to buffer and prints that it has sucessfully grabbed
+void* webcralwer(void* arg) {
+
+    
+    int id = *(int*)arg;
+    printweb("start", id);
+    int articles = 0;
+    start_wait[id-1] = false;
+    done_wait[id-1] = false;
+    while (!done) {
+
+        if(sem_trywait(&bufferfree)!=0)
+        {
+            printweb("wait",id);
+            sem_wait(&bufferfree);
+            printweb("s-wait",id);
+            if(done)
+            break;
+        }
+        printweb("grab", id);
+        usleep(crawler_time);
+        pthread_mutex_lock(&mutex);
+        addtobuffer(str_generator());
+        printweb("f-grab", id);
+        pthread_mutex_unlock(&mutex);
+        
+
+        articles++;
+//This code is to handle needing updating
+//The boolean triggered here causes the strategy thread to print output and sem post so the crawler can properly rest and change another boolean when it's done resting
+        if(articles==m && !done)
+        {   
+            printweb("rest",id);
+           
+           
+            start_wait[id-1] = true;
+            sem_wait(&update[id-1]);
+
+            usleep(strat_time);
+           
+            done_wait[id-1]=true;
+            sem_wait(&update[id-1]);
+             
+            printweb("s-rest",id);
+            articles=0;
+
+        }
+    }
+    printweb("quit", id);
+    pthread_exit(NULL);
+    return NULL;
+}
+//strategy thread is notifed by the crawler it needs rest through global variables
+//It uses semaphores with the crawler thread so both work concurrently and send the messages required
+void* strategy(void* arg)
+{
+   
+    printweb("start",5);
+   
+    while(!finished) //The strategy thread needs to wait for all threads to exit, because a crawler may be sleeping and the strategy thread needs to wake it up
+    {
+        for(int c = 0; c<3; c++)
+        {
+            if(start_wait[c])
+            {
+                printweb("get-cr"+to_string(c+1),5);
+                start_wait[c]=false;
+                sem_post(&update[c]);
+            }
+            else if(done_wait[c])
+            {
+                 printweb("up-cr"+to_string(c+1),5);
+                 done_wait[c]=false;
+                 sem_post(&update[c]);
+            }
+        }
+    }
+    printweb("quit",5);
+    pthread_exit(NULL);
+    return NULL;
+}
+//classifer thread
+//It checks if the buffer is empty, if it is then pop and copy the stored value and sem post since rest of actions are not interfering with other threads
+void* classifier(void* arg)
+{
+    int d;
+    bool worked = false;
+    int key[13]={0}; //Keeping track of how many of each label are stored
+    printweb("start",4);
+    bool firstdone = false;
+    int articlesdone =0; //Keeping track of all the articles done and stored in the text file
+    while (!finished)
+    {
+        while (buffer[0] != NULL)
+        {
+            
+            pthread_mutex_lock(&mutex);
+            printweb("clfy",4);
+            string copy(pop()); //creates a copy, does not edit buffer value
+            pthread_mutex_unlock(&mutex);
+            
+            string gen;
+            d=0;
+             //copy the orginal string into a new string gen
+            for(int c = 0; c<50; c++)
+            {
+                if(copy[c]>='A' && copy[c]<='Z')
+                    tolower(copy[c]);
+                
+               if(copy[c]>='a' && copy[c]<='z')
+               {
+                    gen[d] = copy[c];
+                    d++;
+               }
+            } 
+            articlesdone++;
+            gen[d]='\0';
+            //find what key it is, then save to file
+            key[int(gen[0] - 'a') % 13]++;
+            myfile<<articlesdone<<" "<<(int(gen[0] - 'a') % 13)+1<<" "<<&copy[0]<<endl;
+            myfile.flush();
+          //check if enough articles are processed
+            worked = true;
+            for (int c = 0; c < 13; c++)
+                if (key[c] < 5) {
+                    worked = false;
+                    break;
+                }
+            //print only the first time if worked = true so all articles are showed only once
+            if (worked)
+            {
+                
+                
+                if(!firstdone)
+                {
+                     printweb(to_string(articlesdone)+"-enough",4);
+                    done = true;
+                }
+                firstdone=true;
+      
+            }
+           
+                
+            usleep(classify_time);
+            printweb("f-clfy",4);
+            sem_post(&bufferfree); //rest of actions do not need buffer after mutex so crawlers can stop waiting, but sempost is here so crawlers wait for processing confirmation that they are enough articles
+          
+           
+        }
+
+    }
+        
+        printweb(to_string(articlesdone)+"-stored",4);
+        printweb("quit",4);
+    myfile.close();
+    pthread_exit(NULL);
+    return NULL;
+}
+
+//Main is for intializing values, starting threads and semaphores. It also cleans up all threads and semaphores
+int main(int argc, char **argv) {
+   
+    
+    crawler_time = atoi(argv[1]);
+    classify_time  = atoi(argv[2]);
+    strat_time = atoi(argv[3]);
+    m = atoi(argv[4]);
+   
+    myfile.open ("textcorpus.txt");
+    cout << setw(30) << setfill(' ') << left << "web crawler 1";
+    cout << setw(30) << setfill(' ') << left << "web crawler 2";
+    cout << setw(30) << setfill(' ') << left << "web crawler 3";
+    cout << setw(30) << setfill(' ') << left << "classify";
+    cout << setw(30) << setfill(' ') << left << "strategy" << endl;
+    int rc;
+    int arg;
+    pthread_t threads[3], classifythread, strat;
+    
+    sem_init(&bufferfree, 0, 12);  
+    for(int c = 0; c<3; c++){
+    sem_init(&update[c], 0 , 0);
+    }
+
+   
+
+    rc = pthread_create(&strat, NULL, strategy,NULL);
+    if (rc)
+    {
+            cout << "Error creating";
+            exit(-1);
+    }
+    int ids[]={1,2,3};
+    for (int c = 0; c < 3; c++)
+    {
+        rc = pthread_create(&threads[c], NULL, webcralwer, (void*)(&ids[c]) );
+        if (rc)
+        {
+            cout << "Error creating";
+            exit(-1);
+        }
+    }
+    rc = pthread_create(&classifythread, NULL, classifier, NULL);
+    if (rc)
+    {
+        cout << "Error creating";
+        exit(-1);
+    }
+    for(int c = 0; c<3; c++)
+    pthread_join(threads[c], NULL);
+    finished=true; 
+    pthread_join(strat,NULL);
+    pthread_join(classifythread, NULL);
+    sem_destroy(&bufferfree);
+    pthread_mutex_destroy(&mutex);
+    pthread_mutex_destroy(&mutex_io);
+    for(int c = 0; c<3; c++)
+    sem_destroy(&update[c]);
+
+    return 0;
+}
