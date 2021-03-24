@@ -1,0 +1,17 @@
+To run the program
+first compile it using g++ main.cpp -lpthread -o {executable file name i.e main}
+The program needs 4 arguements, all the the interval times are positive and the unit is ms.
+
+./main {crawler time interval} {classifier time interval} {strategy manager thread interval} {number of articles before strategy manager is called(int)}
+
+i.e ./main 500 200 100 3
+
+The goal of the program is to 'retrive' articles using a crawler, classify them, then store them.
+To do this, three crawler threads are created to retrive articles simultaneously and store them in the buffer
+The classifer retrives them from the buffer 'classifies' them and assigns them a key value from 1-13 depending on the first letter of the generated article
+Once 5 articles of each key are generated the classifer signals the crawlers to stop retriving new articles, finish thier job and stop running
+The classifer classifies remaining articles in buffer and exits.
+
+The strategy manager thread is there to update the crawlers after a predefined number of articles. After M articles (the user inputs this as an arguement before runtime)
+each crawler thread must rest. The crawler signals the strategy manager thread it is resting and again when it has finished resting, demonstrating communication between threads.
+
